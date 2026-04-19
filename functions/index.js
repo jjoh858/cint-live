@@ -9,19 +9,12 @@ const db = admin.firestore();
 
 setGlobalOptions({ region: "us-central1", memory: "512MiB" });
 
-const JUDGE0_URL = "https://judge0-ce.p.rapidapi.com/submissions";
-
-function headers() {
-  return {
-    "Content-Type": "application/json",
-    "X-RapidAPI-Key": process.env.JUDGE0_KEY,
-    "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
-  };
-}
+// Self-hosted Judge0 on GCE VM — set JUDGE0_URL in .env (e.g. http://10.x.x.x:2358)
+const JUDGE0_URL = process.env.JUDGE0_URL || "http://localhost:2358";
 
 async function runOnJudge0({ code, languageId, stdin, wallTimeLimit }) {
   const res = await axios.post(
-    `${JUDGE0_URL}?base64_encoded=false&wait=true`,
+    `${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`,
     {
       source_code: code,
       language_id: languageId,
@@ -29,7 +22,7 @@ async function runOnJudge0({ code, languageId, stdin, wallTimeLimit }) {
       cpu_time_limit: 2,
       wall_time_limit: wallTimeLimit,
     },
-    { headers: headers(), timeout: (wallTimeLimit + 10) * 1000 }
+    { headers: { "Content-Type": "application/json" }, timeout: (wallTimeLimit + 10) * 1000 }
   );
   return res.data;
 }
@@ -44,10 +37,8 @@ exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
       timedOut: r.status?.id === 5,
     };
   } catch (err) {
-    const s = err.response?.status;
-    if (s === 429) throw new HttpsError("resource-exhausted", "Judge0 rate limit, try again in a bit.");
-    if (err.code === "ECONNABORTED") throw new HttpsError("deadline-exceeded", "Judge0 timed out.");
-    throw new HttpsError("internal", `Judge0 error: ${err.message}`);
+    if (err.code === "ECONNABORTED") throw new HttpsError("deadline-exceeded", "Judge timed out.");
+    throw new HttpsError("internal", `Judge error: ${err.message}`);
   }
 });
 
