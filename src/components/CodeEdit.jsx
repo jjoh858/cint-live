@@ -5,8 +5,11 @@ const CodeEditor = ({ code, setCode }) => {
       onChange={(e) => setCode(e.target.value)}
       style={{
         width: "100%",
-        height: "300px",
+        height: "100%",
         fontFamily: "monospace",
+        padding: "16px",
+        boxSizing: "border-box",
+        resize: "none",
       }}
     />
   );
