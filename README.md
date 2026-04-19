@@ -242,7 +242,7 @@ node uploadProblems.js
 
 ### Judge0 VM Management
 ```bash
-# SSH into the VM (requires IAP tunnel — direct SSH blocked by Zscaler)
+# SSH into the VM (uses IAP tunnel)
 gcloud compute ssh judge0-vm --zone=us-central1-a --project=cint-live --tunnel-through-iap
 
 # Check Judge0 health
@@ -272,4 +272,4 @@ gcloud functions logs read runCode --region=us-central1 --project=cint-live --li
 
 3. **Firestore undefined values**: When Judge0 returns null fields, writing them to Firestore throws errors. Fixed with `db.settings({ ignoreUndefinedProperties: true })`.
 
-4. **SSH access**: Direct SSH to the Judge0 VM is blocked by Zscaler. Use IAP TCP tunneling: `gcloud compute ssh --tunnel-through-iap`.
+4. **SSH access**: Use IAP TCP tunneling to reach the Judge0 VM: `gcloud compute ssh --tunnel-through-iap`.
