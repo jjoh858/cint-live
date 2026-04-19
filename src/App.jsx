@@ -85,7 +85,7 @@ export default function App() {
           element={
             user ? (
               <Layout user={user} showSidebar={true} problems={problems}>
-                <ProblemPage />
+                <ProblemPage problems={problems} />
               </Layout>
             ) : (
               <Login />
