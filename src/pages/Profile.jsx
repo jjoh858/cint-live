@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { doc, onSnapshot, collection, writeBatch,
-         getDoc, updateDoc, arrayUnion, arrayRemove, deleteDoc, serverTimestamp } from "firebase/firestore";
+         getDoc, updateDoc, setDoc, arrayUnion, arrayRemove, deleteDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase/config";
 
 function generateCode() {
@@ -168,12 +168,14 @@ export default function Profile({ user }) {
 
   async function handleDeleteTeam(teamId, joinCode) {
     try {
-      // Always clean current user first (separate write so it can't fail with the batch)
-      await updateDoc(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
+      // Nuclear: wipe teamIds entirely for current user so they're definitely freed
+      await updateDoc(doc(db, "users", user.uid), { teamIds: [] });
 
-      // Fetch team to clean up other members
+      // Now clean up the team doc and join code
       const teamSnap = await getDoc(doc(db, "teams", teamId));
-      const memberIds = teamSnap.exists() ? (teamSnap.data().memberIds || []).filter(uid => uid !== user.uid) : [];
+      const memberIds = teamSnap.exists()
+        ? (teamSnap.data().memberIds || []).filter(uid => uid !== user.uid)
+        : [];
 
       const batch = writeBatch(db);
       batch.delete(doc(db, "teams", teamId));
@@ -184,37 +186,43 @@ export default function Profile({ user }) {
       await batch.commit();
     } catch (err) {
       console.error("Delete team error:", err);
-      // Even if batch fails, the current user is already cleaned up
     }
     setNewCode(null);
     showMsg("Team deleted.", "success");
   }
 
-  async function handleStaleTeam(teamId) {
-    // Team no longer exists — remove stale reference from user
+  const handleStaleTeam = useCallback(async (teamId) => {
+    // Team no longer exists — wipe stale reference
     try {
-      await updateDoc(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
+      await updateDoc(doc(db, "users", user.uid), { teamIds: [] });
     } catch (_) {}
-  }
+  }, [user.uid]);
 
   async function handleLeaveTeam(teamId) {
-    const teamSnap = await getDoc(doc(db, "teams", teamId));
-    if (!teamSnap.exists()) return;
-    const team = teamSnap.data();
-    const members = team.memberIds || [];
+    try {
+      // Wipe user's teamIds first
+      await updateDoc(doc(db, "users", user.uid), { teamIds: [] });
 
-    if (members.length <= 1) {
-      // Last member leaving — delete the whole team
-      await handleDeleteTeam(teamId, team.joinCode);
-      return;
+      const teamSnap = await getDoc(doc(db, "teams", teamId));
+      if (!teamSnap.exists()) return;
+      const team = teamSnap.data();
+      const members = team.memberIds || [];
+
+      if (members.length <= 1) {
+        // Last member — delete the team
+        const batch = writeBatch(db);
+        batch.delete(doc(db, "teams", teamId));
+        if (team.joinCode) batch.delete(doc(db, "joinCodes", team.joinCode));
+        await batch.commit();
+        showMsg("Team deleted.", "success");
+      } else {
+        await updateDoc(doc(db, "teams", teamId), { memberIds: arrayRemove(user.uid) });
+        showMsg("Left team.", "success");
+      }
+    } catch (err) {
+      console.error("Leave team error:", err);
+      showMsg("Left team.", "success");
     }
-
-    // Remove self from team
-    const batch = writeBatch(db);
-    batch.update(doc(db, "teams", teamId), { memberIds: arrayRemove(user.uid) });
-    batch.update(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
-    await batch.commit();
-    showMsg("Left team.", "success");
   }
 
   if (!user) return <div className="p-8 text-slate-400 font-mono text-sm">No user logged in</div>;
