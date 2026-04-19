@@ -54,6 +54,10 @@ exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
 exports.processSubmission = onDocumentCreated(
   { document: "submissions/{id}", timeoutSeconds: 300, retry: false },
   async (event) => {
+    if (!event.data) {
+      console.log("No event data, skipping.");
+      return;
+    }
     const id = event.params.id;
     const data = event.data.data();
     const subRef = db.collection("submissions").doc(id);
