@@ -28,29 +28,36 @@ export default function App() {
   const problems = [...rawProblems].sort((a, b) => Number(a.id) - Number(b.id));
 
   useEffect(() => {
+  // Safety timeout — if auth never resolves, stop loading after 5s
+  const timeout = setTimeout(() => setLoading(false), 5000);
+
   const unsub = onAuthStateChanged(auth, async (user) => {
+    clearTimeout(timeout);
     setUser(user);
 
     if (user) {
-      const userRef = doc(db, "users", user.uid);
-      const userSnap = await getDoc(userRef);
+      try {
+        const userRef = doc(db, "users", user.uid);
+        const userSnap = await getDoc(userRef);
 
-      // 🔥 ONLY create if doesn't exist
-      if (!userSnap.exists()) {
-        await setDoc(userRef, {
-          name: user.displayName || "Anonymous",
-          email: user.email,
-          photoURL: user.photoURL || "",
-          score: 0,
-          createdAt: new Date(),
-        });
+        if (!userSnap.exists()) {
+          await setDoc(userRef, {
+            name: user.displayName || "Anonymous",
+            email: user.email,
+            photoURL: user.photoURL || "",
+            score: 0,
+            createdAt: new Date(),
+          });
+        }
+      } catch (err) {
+        console.error("User doc sync error:", err);
       }
     }
 
     setLoading(false);
   });
 
-  return () => unsub();
+  return () => { clearTimeout(timeout); unsub(); };
 }, []);
 
   const logout = async () => {
