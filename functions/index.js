@@ -45,17 +45,51 @@ exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
 exports.processSubmission = onDocumentCreated(
   { document: "submissions/{id}", timeoutSeconds: 300, retry: false },
   async (event) => {
-    if (!event.data) {
-      console.log("No event data, skipping.");
+    // Try to get submission ID from standard event.params first
+    let id = event.params?.id;
+
+    // Fallback: extract from CloudEvent subject or document path
+    if (!id && event.subject) {
+      const parts = event.subject.split("/");
+      id = parts[parts.length - 1];
+    }
+    if (!id && event.document) {
+      const parts = event.document.split("/");
+      id = parts[parts.length - 1];
+    }
+
+    // Last resort: extract from raw protobuf bytes (Eventarc workaround)
+    if (!id) {
+      try {
+        const raw = Buffer.from(Object.values(event));
+        const str = raw.toString("utf8");
+        const match = str.match(/submissions\/([a-zA-Z0-9]+)/);
+        if (match) id = match[1];
+      } catch (e) {
+        console.log("Could not parse event:", e.message);
+      }
+    }
+
+    if (!id) {
+      console.log("Could not extract submission ID, skipping.");
       return;
     }
-    const id = event.params.id;
-    const data = event.data.data();
+
+    console.log("Processing submission:", id);
+
+    // Always read from Firestore directly (bypasses broken event.data)
+    const snap = await db.collection("submissions").doc(id).get();
+    if (!snap.exists) {
+      console.log(`Submission ${id} not found.`);
+      return;
+    }
+    const data = snap.data();
     const subRef = db.collection("submissions").doc(id);
 
+    // Claim the submission atomically
     const claimed = await db.runTransaction(async (tx) => {
-      const snap = await tx.get(subRef);
-      const cur = snap.data() || {};
+      const fresh = await tx.get(subRef);
+      const cur = fresh.data() || {};
       if (cur.status && cur.status !== "Pending") return false;
       tx.update(subRef, { status: "Running" });
       return true;
@@ -67,7 +101,8 @@ exports.processSubmission = onDocumentCreated(
 
     try {
       const problemSnap = await db.collection("problems").doc(data.problemId).get();
-      const testCases = problemSnap.data().testCases || [];
+      const testCasesRaw = problemSnap.data().testCases;
+      const testCases = typeof testCasesRaw === "string" ? JSON.parse(testCasesRaw) : testCasesRaw || [];
       const results = [];
 
       for (const test of testCases) {
