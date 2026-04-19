@@ -7,19 +7,25 @@ function generateCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-function TeamCard({ teamId, userId, onDelete, onLeave }) {
-  const [team, setTeam] = useState(null);
+function TeamCard({ teamId, userId, onDelete, onLeave, onStale }) {
+  const [team, setTeam] = useState(undefined); // undefined = loading, null = not found
   const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, "teams", teamId), (snap) => {
-      if (snap.exists()) setTeam(snap.data());
-      else setTeam(null);
+      if (snap.exists()) {
+        setTeam(snap.data());
+      } else {
+        setTeam(null);
+        // Team was deleted externally — clean up stale reference
+        if (onStale) onStale(teamId);
+      }
     });
     return () => unsub();
-  }, [teamId]);
+  }, [teamId, onStale]);
 
-  if (!team) return null;
+  if (team === undefined) return null; // loading
+  if (team === null) return null; // deleted
 
   const isCreator = team.createdBy === userId;
   const isSoleMember = (team.memberIds?.length || 0) <= 1;
@@ -161,20 +167,34 @@ export default function Profile({ user }) {
   }
 
   async function handleDeleteTeam(teamId, joinCode) {
-    // Fetch team to clean up all members
-    const teamSnap = await getDoc(doc(db, "teams", teamId));
-    const memberIds = teamSnap.exists() ? teamSnap.data().memberIds || [] : [];
+    try {
+      // Always clean current user first (separate write so it can't fail with the batch)
+      await updateDoc(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
 
-    const batch = writeBatch(db);
-    batch.delete(doc(db, "teams", teamId));
-    if (joinCode) batch.delete(doc(db, "joinCodes", joinCode));
-    // Remove teamId from every member's teamIds
-    for (const uid of memberIds) {
-      batch.update(doc(db, "users", uid), { teamIds: arrayRemove(teamId) });
+      // Fetch team to clean up other members
+      const teamSnap = await getDoc(doc(db, "teams", teamId));
+      const memberIds = teamSnap.exists() ? (teamSnap.data().memberIds || []).filter(uid => uid !== user.uid) : [];
+
+      const batch = writeBatch(db);
+      batch.delete(doc(db, "teams", teamId));
+      if (joinCode) batch.delete(doc(db, "joinCodes", joinCode));
+      for (const uid of memberIds) {
+        batch.update(doc(db, "users", uid), { teamIds: arrayRemove(teamId) });
+      }
+      await batch.commit();
+    } catch (err) {
+      console.error("Delete team error:", err);
+      // Even if batch fails, the current user is already cleaned up
     }
-    await batch.commit();
     setNewCode(null);
     showMsg("Team deleted.", "success");
+  }
+
+  async function handleStaleTeam(teamId) {
+    // Team no longer exists — remove stale reference from user
+    try {
+      await updateDoc(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
+    } catch (_) {}
   }
 
   async function handleLeaveTeam(teamId) {
@@ -221,7 +241,7 @@ export default function Profile({ user }) {
             <h2 className="font-mono text-[10px] font-bold tracking-widest uppercase text-slate-400 mb-3">My Team</h2>
             <div className="space-y-3">
               {data.teamIds.map(id => (
-                <TeamCard key={id} teamId={id} userId={user.uid} onDelete={handleDeleteTeam} onLeave={handleLeaveTeam} />
+                <TeamCard key={id} teamId={id} userId={user.uid} onDelete={handleDeleteTeam} onLeave={handleLeaveTeam} onStale={handleStaleTeam} />
               ))}
             </div>
           </div>
