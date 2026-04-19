@@ -122,48 +122,58 @@ export default function Profile({ user }) {
     if (!teamName.trim()) return;
     if (data?.teamIds?.length >= 1) { showMsg("You can only be in one team."); return; }
 
-    const code = generateCode();
-    const teamRef = doc(collection(db, "teams"));
-    const batch = writeBatch(db);
+    try {
+      const code = generateCode();
+      const teamRef = doc(collection(db, "teams"));
+      const batch = writeBatch(db);
 
-    batch.set(teamRef, {
-      name: teamName.trim(),
-      createdBy: user.uid,
-      createdAt: serverTimestamp(),
-      memberIds: [user.uid],
-      joinCode: code,
-      level,
-      score: 0,
-      solvedProblems: [],
-    });
-    batch.set(doc(db, "joinCodes", code), { teamId: teamRef.id });
-    batch.update(doc(db, "users", user.uid), { teamIds: arrayUnion(teamRef.id) });
+      batch.set(teamRef, {
+        name: teamName.trim(),
+        createdBy: user.uid,
+        createdAt: serverTimestamp(),
+        memberIds: [user.uid],
+        joinCode: code,
+        level,
+        score: 0,
+        solvedProblems: [],
+      });
+      batch.set(doc(db, "joinCodes", code), { teamId: teamRef.id });
+      batch.set(doc(db, "users", user.uid), { teamIds: [teamRef.id] }, { merge: true });
 
-    await batch.commit();
-    setNewCode(code);
-    setTeamName("");
-    showMsg("Team created!", "success");
+      await batch.commit();
+      setNewCode(code);
+      setTeamName("");
+      showMsg("Team created!", "success");
+    } catch (err) {
+      console.error("Create team error:", err);
+      showMsg("Failed to create team: " + err.message);
+    }
   }
 
   async function handleJoinTeam() {
     const code = joinCode.trim().toUpperCase();
     if (data?.teamIds?.length >= 1) { showMsg("You can only be in one team."); return; }
 
-    const codeSnap = await getDoc(doc(db, "joinCodes", code));
-    if (!codeSnap.exists()) { showMsg("Invalid code — double check and try again."); return; }
+    try {
+      const codeSnap = await getDoc(doc(db, "joinCodes", code));
+      if (!codeSnap.exists()) { showMsg("Invalid code — double check and try again."); return; }
 
-    const { teamId } = codeSnap.data();
-    const teamSnap = await getDoc(doc(db, "teams", teamId));
-    if (!teamSnap.exists()) { showMsg("Team not found."); return; }
-    if (teamSnap.data().memberIds.includes(user.uid)) { showMsg("You're already in this team."); return; }
+      const { teamId } = codeSnap.data();
+      const teamSnap = await getDoc(doc(db, "teams", teamId));
+      if (!teamSnap.exists()) { showMsg("Team not found."); return; }
+      if (teamSnap.data().memberIds.includes(user.uid)) { showMsg("You're already in this team."); return; }
 
-    await Promise.all([
-      updateDoc(doc(db, "teams", teamId), { memberIds: arrayUnion(user.uid) }),
-      updateDoc(doc(db, "users", user.uid), { teamIds: arrayUnion(teamId) }),
-    ]);
+      await Promise.all([
+        updateDoc(doc(db, "teams", teamId), { memberIds: arrayUnion(user.uid) }),
+        setDoc(doc(db, "users", user.uid), { teamIds: [teamId] }, { merge: true }),
+      ]);
 
-    setJoinCode("");
-    showMsg("Joined successfully!", "success");
+      setJoinCode("");
+      showMsg("Joined successfully!", "success");
+    } catch (err) {
+      console.error("Join team error:", err);
+      showMsg("Failed to join team: " + err.message);
+    }
   }
 
   async function handleDeleteTeam(teamId, joinCode) {
