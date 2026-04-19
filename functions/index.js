@@ -1,113 +1,136 @@
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
-const { onCall } = require("firebase-functions/v2/https");
+const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { setGlobalOptions } = require("firebase-functions/v2");
 const admin = require("firebase-admin");
 const axios = require("axios");
 
 admin.initializeApp();
 const db = admin.firestore();
 
-exports.runCode = onCall(async (request) => {
-    const data = request.data;
-    const response = await axios.post(
-        "https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=true",
-        {
-            source_code: data.code,
-            language_id: data.languageId,
-            stdin: data.stdin || "",
-            cpu_time_limit: 2,
-            wall_time_limit: 5,
-        },
-        {
-            headers: {
-                "Content-Type": "application/json",
-                "X-RapidAPI-Key": process.env.JUDGE0_KEY,
-                "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
-            },
-        }
-    );
+setGlobalOptions({ region: "us-central1", memory: "512MiB" });
 
+const JUDGE0_URL = "https://judge0-ce.p.rapidapi.com/submissions";
+
+function headers() {
+  return {
+    "Content-Type": "application/json",
+    "X-RapidAPI-Key": process.env.JUDGE0_KEY,
+    "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+  };
+}
+
+async function runOnJudge0({ code, languageId, stdin, wallTimeLimit }) {
+  const res = await axios.post(
+    `${JUDGE0_URL}?base64_encoded=false&wait=true`,
+    {
+      source_code: code,
+      language_id: languageId,
+      stdin: stdin || "",
+      cpu_time_limit: 2,
+      wall_time_limit: wallTimeLimit,
+    },
+    { headers: headers(), timeout: (wallTimeLimit + 10) * 1000 }
+  );
+  return res.data;
+}
+
+exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
+  const { code, languageId, stdin } = request.data;
+  try {
+    const r = await runOnJudge0({ code, languageId, stdin, wallTimeLimit: 5 });
     return {
-        stdout: response.data.stdout || "",
-        stderr: response.data.stderr || "",
-        timedOut: response.data.status?.id === 5,
+      stdout: r.stdout || "",
+      stderr: r.stderr || r.compile_output || "",
+      timedOut: r.status?.id === 5,
     };
+  } catch (err) {
+    const s = err.response?.status;
+    if (s === 429) throw new HttpsError("resource-exhausted", "Judge0 rate limit, try again in a bit.");
+    if (err.code === "ECONNABORTED") throw new HttpsError("deadline-exceeded", "Judge0 timed out.");
+    throw new HttpsError("internal", `Judge0 error: ${err.message}`);
+  }
 });
 
-exports.processSubmission = onDocumentCreated("submissions/{id}", async (event) => {
-    console.log("processSubmission triggered!"); // ← add this as first line
-    const data = event.data.data();
+exports.processSubmission = onDocumentCreated(
+  { document: "submissions/{id}", timeoutSeconds: 300, retry: false },
+  async (event) => {
     const id = event.params.id;
-    console.log("Submission data:", JSON.stringify(data));
+    const data = event.data.data();
+    const subRef = db.collection("submissions").doc(id);
 
-    const problemSnap = await db.collection("problems").doc(data.problemId).get();
-    const testCases = problemSnap.data().testCases;
-    const results = [];
+    const claimed = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(subRef);
+      const cur = snap.data() || {};
+      if (cur.status && cur.status !== "Pending") return false;
+      tx.update(subRef, { status: "Running" });
+      return true;
+    });
+    if (!claimed) {
+      console.log(`Submission ${id} already claimed, skipping.`);
+      return;
+    }
 
-    for (const test of testCases) {
-        const response = await axios.post("https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=true",  // ← add wait=true
-            {
-                source_code: data.code,
-                language_id: data.languageId,
-                stdin: test.input,
-                cpu_time_limit: 2,
-                wall_time_limit: 5,
-            },
-            {
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-RapidAPI-Key": process.env.JUDGE0_KEY,
-                    "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
-                },
-            }
-        );
-        console.log("Judge0 full response:", JSON.stringify(response.data));
+    try {
+      const problemSnap = await db.collection("problems").doc(data.problemId).get();
+      const testCases = problemSnap.data().testCases || [];
+      const results = [];
 
-
-        const output = (response.data.stdout || "").trim();
-        const timedOut = response.data.status?.id === 5;
-
-        console.log("Test input:", test.input);
-        console.log("Expected:", test.expected);
-        console.log("Got:", output);
-        console.log("Status:", response.data.status);
-
-        results.push({
+      for (const test of testCases) {
+        try {
+          const r = await runOnJudge0({
+            code: data.code,
+            languageId: data.languageId,
+            stdin: test.input,
+            wallTimeLimit: 15,
+          });
+          const output = (r.stdout || "").trim();
+          const timedOut = r.status?.id === 5;
+          results.push({
             input: test.input,
             expected: test.output,
             output,
-            passed: !timedOut && output === test.output,
+            passed: !timedOut && output === (test.output || "").trim(),
             timedOut,
-        });
-    }
+          });
+        } catch (err) {
+          console.error(`Test case error for ${id}:`, err.response?.status, err.message);
+          results.push({
+            input: test.input,
+            expected: test.output,
+            output: "",
+            passed: false,
+            timedOut: false,
+            error: err.message,
+          });
+        }
+      }
 
-    const timedOut = results.some((r) => r.timedOut);
-    const allPassed = results.every((r) => r.passed);
-
-    const status = timedOut ? "Time Limit Exceeded"
+      const timedOut = results.some((r) => r.timedOut);
+      const allPassed = results.length > 0 && results.every((r) => r.passed);
+      const status = timedOut ? "Time Limit Exceeded"
         : allPassed ? "Accepted"
         : "Wrong Answer";
 
-    console.log("Results being saved:", JSON.stringify(results));
+      await subRef.update({ status, results });
 
-    await db.collection("submissions").doc(id).update({
-        status,
-        results,
-    });
-
-    if (allPassed) {
+      if (allPassed) {
         const teamRef = db.collection("teams").doc(data.teamId);
-
+        const points = problemSnap.data().points || 100;
         await db.runTransaction(async (tx) => {
-            const doc = await tx.get(teamRef);
-            const team = doc.data();
-            const solved = team.solvedProblems || [];
-
-            if (!solved.includes(data.problemId)) {
-                tx.update(teamRef, {
-                    score: admin.firestore.FieldValue.increment(problemSnap.data().points || 100),  // ← use points
-                    solvedProblems: [...solved, data.problemId],
-                });
-            }
+          const doc = await tx.get(teamRef);
+          const team = doc.data() || {};
+          const solved = team.solvedProblems || [];
+          if (!solved.includes(data.problemId)) {
+            tx.update(teamRef, {
+              score: admin.firestore.FieldValue.increment(points),
+              solvedProblems: [...solved, data.problemId],
+            });
+          }
         });
+      }
+    } catch (err) {
+      console.error(`processSubmission failed for ${id}:`, err);
+      await subRef.update({ status: "Error", error: err.message }).catch(() => {});
     }
-});
+  }
+);
