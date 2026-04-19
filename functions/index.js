@@ -6,6 +6,7 @@ const axios = require("axios");
 
 admin.initializeApp();
 const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true });
 
 setGlobalOptions({ region: "us-central1", memory: "512MiB" });
 
