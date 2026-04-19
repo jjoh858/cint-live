@@ -44,7 +44,7 @@ exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
 });
 
 exports.processSubmission = onDocumentCreated(
-  { document: "submissions/{id}", timeoutSeconds: 300, retry: false },
+  { document: "submissions/{id}", timeoutSeconds: 540, retry: false },
   async (event) => {
     // Try to get submission ID from standard event.params first
     let id = event.params?.id;
@@ -104,9 +104,7 @@ exports.processSubmission = onDocumentCreated(
       const problemSnap = await db.collection("problems").doc(data.problemId).get();
       const testCasesRaw = problemSnap.data().testCases;
       const testCases = typeof testCasesRaw === "string" ? JSON.parse(testCasesRaw) : testCasesRaw || [];
-      const results = [];
-
-      for (const test of testCases) {
+      const results = await Promise.all(testCases.map(async (test) => {
         try {
           const r = await runOnJudge0({
             code: data.code,
@@ -116,25 +114,25 @@ exports.processSubmission = onDocumentCreated(
           });
           const output = (r.stdout || "").trim();
           const timedOut = r.status?.id === 5;
-          results.push({
+          return {
             input: test.input,
             expected: test.output,
             output,
             passed: !timedOut && output === (test.output || "").trim(),
             timedOut,
-          });
+          };
         } catch (err) {
           console.error(`Test case error for ${id}:`, err.response?.status, err.message);
-          results.push({
+          return {
             input: test.input,
             expected: test.output,
             output: "",
             passed: false,
             timedOut: false,
             error: err.message,
-          });
+          };
         }
-      }
+      }));
 
       const timedOut = results.some((r) => r.timedOut);
       const allPassed = results.length > 0 && results.every((r) => r.passed);
