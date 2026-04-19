@@ -4,6 +4,7 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import { doc, getDoc, setDoc } from "firebase/firestore";
 
 import { auth, db } from "./firebase/config";
+import { useProblems } from "./hooks/useProblems";
 
 import Layout from "./components/layout";
 
@@ -15,21 +16,16 @@ import Login from "./pages/Loginpage";
 import Navbar from "./components/NavBar";
 import Profile from "./pages/Profile";
 
-
-const problems = [
-  { id: "1", title: "Two Sum" },
-  { id: "2", title: "Binary Search" },
-  { id: "3", title: "Graph Traversal" },
-];
-
-// 🔥 wrapper for protected pages
-function ProtectedLayout({ user, children }) {
+// 🔥 wrapper for protected pages — defined inside App so it can access problems
+function ProtectedLayout({ user, problems, children }) {
   return <Layout user={user} problems={problems}>{children}</Layout>;
 }
 
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const rawProblems = useProblems();
+  const problems = [...rawProblems].sort((a, b) => Number(a.id) - Number(b.id));
 
   useEffect(() => {
   const unsub = onAuthStateChanged(auth, async (user) => {
@@ -75,7 +71,7 @@ export default function App() {
           path="/"
           element={
             user ? (
-              <ProtectedLayout user={user}>
+              <ProtectedLayout user={user} problems={problems}>
                 <Home user={user} />
               </ProtectedLayout>
             ) : (
@@ -114,7 +110,7 @@ export default function App() {
           path="/leaderboard"
           element={
             user ? (
-              <ProtectedLayout user={user}>
+              <ProtectedLayout user={user} problems={problems}>
                 <Leaderboard />
               </ProtectedLayout>
             ) : (
