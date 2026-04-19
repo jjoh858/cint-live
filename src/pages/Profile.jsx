@@ -7,17 +7,22 @@ function generateCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-function TeamCard({ teamId, onDelete }) {
+function TeamCard({ teamId, userId, onDelete, onLeave }) {
   const [team, setTeam] = useState(null);
   const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
-    getDoc(doc(db, "teams", teamId)).then(snap => {
+    const unsub = onSnapshot(doc(db, "teams", teamId), (snap) => {
       if (snap.exists()) setTeam(snap.data());
+      else setTeam(null);
     });
+    return () => unsub();
   }, [teamId]);
 
   if (!team) return null;
+
+  const isCreator = team.createdBy === userId;
+  const isSoleMember = (team.memberIds?.length || 0) <= 1;
 
   return (
     <div className="rounded-2xl border border-purple-100 bg-purple-50/50 px-5 py-4">
@@ -35,30 +40,32 @@ function TeamCard({ teamId, onDelete }) {
       </div>
       <div className="flex items-center gap-4 font-mono text-xs text-slate-400">
         <span>{team.memberIds?.length || 1} member{team.memberIds?.length !== 1 ? "s" : ""}</span>
-        <span className="text-slate-300">•</span>
+        <span className="text-slate-300">&bull;</span>
         <span>Code: <span className="font-bold text-slate-600 tracking-widest">{team.joinCode}</span></span>
       </div>
       {team.score > 0 && (
         <div className="mt-2 font-mono text-xs text-violet-600 font-bold">{team.score} pts</div>
       )}
 
-      {/* Delete button */}
       <div className="mt-4 pt-4 border-t border-purple-100">
         {!confirming ? (
           <button
             onClick={() => setConfirming(true)}
             className="font-mono text-[11px] font-bold tracking-widest uppercase text-red-400 hover:text-red-600 transition-colors"
           >
-            Delete Team
+            {isSoleMember ? "Delete Team" : isCreator ? "Delete Team" : "Leave Team"}
           </button>
         ) : (
           <div className="flex items-center gap-3">
             <span className="font-mono text-[11px] text-slate-500">Are you sure?</span>
             <button
-              onClick={() => onDelete(teamId, team.joinCode)}
+              onClick={() => {
+                if (isSoleMember || isCreator) onDelete(teamId, team.joinCode);
+                else onLeave(teamId);
+              }}
               className="font-mono text-[11px] font-bold tracking-widest uppercase text-white bg-red-500 hover:bg-red-600 px-3 py-1 rounded-lg transition-colors"
             >
-              Yes, delete
+              {isSoleMember ? "Yes, delete" : isCreator ? "Yes, delete" : "Yes, leave"}
             </button>
             <button
               onClick={() => setConfirming(false)}
@@ -154,13 +161,40 @@ export default function Profile({ user }) {
   }
 
   async function handleDeleteTeam(teamId, joinCode) {
+    // Fetch team to clean up all members
+    const teamSnap = await getDoc(doc(db, "teams", teamId));
+    const memberIds = teamSnap.exists() ? teamSnap.data().memberIds || [] : [];
+
     const batch = writeBatch(db);
     batch.delete(doc(db, "teams", teamId));
-    batch.delete(doc(db, "joinCodes", joinCode));
-    batch.update(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
+    if (joinCode) batch.delete(doc(db, "joinCodes", joinCode));
+    // Remove teamId from every member's teamIds
+    for (const uid of memberIds) {
+      batch.update(doc(db, "users", uid), { teamIds: arrayRemove(teamId) });
+    }
     await batch.commit();
     setNewCode(null);
     showMsg("Team deleted.", "success");
+  }
+
+  async function handleLeaveTeam(teamId) {
+    const teamSnap = await getDoc(doc(db, "teams", teamId));
+    if (!teamSnap.exists()) return;
+    const team = teamSnap.data();
+    const members = team.memberIds || [];
+
+    if (members.length <= 1) {
+      // Last member leaving — delete the whole team
+      await handleDeleteTeam(teamId, team.joinCode);
+      return;
+    }
+
+    // Remove self from team
+    const batch = writeBatch(db);
+    batch.update(doc(db, "teams", teamId), { memberIds: arrayRemove(user.uid) });
+    batch.update(doc(db, "users", user.uid), { teamIds: arrayRemove(teamId) });
+    await batch.commit();
+    showMsg("Left team.", "success");
   }
 
   if (!user) return <div className="p-8 text-slate-400 font-mono text-sm">No user logged in</div>;
@@ -187,7 +221,7 @@ export default function Profile({ user }) {
             <h2 className="font-mono text-[10px] font-bold tracking-widest uppercase text-slate-400 mb-3">My Team</h2>
             <div className="space-y-3">
               {data.teamIds.map(id => (
-                <TeamCard key={id} teamId={id} onDelete={handleDeleteTeam} />
+                <TeamCard key={id} teamId={id} userId={user.uid} onDelete={handleDeleteTeam} onLeave={handleLeaveTeam} />
               ))}
             </div>
           </div>
