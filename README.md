@@ -7,294 +7,294 @@ A real-time competitive programming platform built with React + Firebase + serve
 ### High-Level System Overview
 
 ```
-┌───────────────���─────────────────────────────────────────────────────────────────┐
-│                              USER'S BROWSER                                     │
-│                                                                                 │
-│  ┌─────────────┐  ┌──────���───────┐  ┌─────────────┐  ┌───────────────────────┐ │
-│  │  Homepage    │  │   Profile     │  │ Leaderboard ���  │   Problem View        │ │
-│  │  (countdown) │  │ (team mgmt)  │  │ (rankings)  │  │ (editor + submit)     │ │
-│  ���─────────────┘  └───���──────────┘  └─────────────┘  └───��───────────────────┘ │
-│                                                                                 │
-│  React 19 + Vite 8 + Tailwind 4 + React Router                                 │
-└────────────┬──────────────────┬────���──────────────────────────┬─────────────────┘
-             │                  │                               │
-             │ Google SSO       │ Real-time listeners           │ httpsCallable
-             │                  │ (onSnapshot)                  │ "Run Code" / Submit
-             ▼                  ▼                               ▼
-┌───���────────────────────────────────��────────────────────────────────────────────┐
-│                         FIREBASE  (GCP: cint-live)                              │
-│                                                                                 │
-│  ┌──────────────────┐    ┌──────────────────────────────────────────────────┐   │
-│  │  Firebase Auth    │    │              Firestore Database                  │   │
-│  │                   │    │                                                  │   │
-│  │  Google Provider  │    │  ┌──────────┐ ┌────────┐ ┌───��───┐ ┌──���──────┐ │   │
-│  │  SSO login flow   │    │  │ problems │ │ teams  │ │ users │ │joinCodes│ │   │
-│  └──────────────────┘    │  │ (9 docs) │ │        │ │       │ │         │ │   │
-│                           │  └──────────┘ └��───────┘ └───────┘ └─────────┘ │   │
-│                           │                                                  │   │
-│                           │  ┌───────────────────────────────────────┐       │   │
-│                           │  │            submissions                 │       │   │
-│                           │  │  (created by frontend on "Submit")     │       │   │
-���                           │  │                                        ���       │   │
-│                           │  │  status: Pending → Running → Result    │       │   │
-│                           │  └──────────────────┬────────────────────┘       │   │
-│                           └─────────────────────┼────────────────────────────┘   │
-│                                                 │                                │
-│                                                 │ Firestore onCreate trigger     │
-│                                                 │ (Eventarc)                     │
-│                                                 ▼                                │
-│  ┌──────────────────────────────────────────────────────────────────────────┐   │
-│  │              Cloud Functions Gen2  (us-central1, Node.js 22)             │   │
-│  │                                                                          │   │
-│  │  ��─────────────────────────┐    ┌───���──────────────────────────────────┐ │   │
-│  ���  │      runCode            │    │       processSubmission              │ │   │
-���  │  │  (httpsCallable)        │    │    (Firestore onCreate trigger)      │ │   ���
-│  │  │                         │    │                                      │ │   │
-│  │  │  - Receives code +      │    │  1. Extract submission ID            ��� │   │
-│  │  │    language from UI      │    │     (protobuf fallback)             │ │   │
-│  │  │  - Sends to Cloud Run   │    │  2. Read submission from Firestore   │ │   │
-│  │  │  - 10s time limit       │    │  3. Claim: Pending → Running        │ │   │
-│  │  │  - Returns stdout/err   │    │  4. Fetch test cases from problem    │ │   │
-│  │  │                         │    │  5. Run ALL tests in parallel        │ ��   │
-│  │  │  Timeout: 30s           │    │     (Promise.all → Cloud Run)        │ │   │
-│  │  └────────────┬────────────┘    │  6. Write results back               │ │   │
-│  │               │                 │  7. If all pass: update team score    │ ��   │
-│  │               │                 │                                      │ │   │
-│  │               │                 │  Timeout: 540s                       │ │   │
-│  │               │                 └──────────────┬───────────────────────┘ │   │
-│  └───────────────┼─���──────────────────────────────┼──���──────────────────────┘   │
-└──────────────────┼────────────────────────────────┼─────────────────────────────┘
-                   │                                │
-                   │  HTTP POST /run                │  HTTP POST /run (parallel)
-                   │                                │  (15 test cases = 15 instances)
-                   ▼                                ▼
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│         Cloud Run: code-runner  (us-central1, serverless)                       │
-│         https://code-runner-1074290783330.us-central1.run.app                   ���
-│                                                                                 │
-│  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │                        Container (Node.js 20)                           │    │
-│  │                                                                         │    │
-│  │  Runtimes installed:                                                    ���    │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐               │    │
-│  │  │ Python 3 │  │ Node.js  │  │ g++ (C++)│  │ Java JDK │               │    │
-│  │  │ (id: 71) │  │ (id: 63) │  │ (id: 54) │  │ (id: 62) │               │    │
-│  │  └──────────┘  └──────────┘  └────���─────┘  └──────────┘               │    │
-│  │                                                                         │    │
-│  │  POST /run  →  writes code to temp file  →  subprocess.exec            │    │
-│  │               with stdin from file          with timeout + ulimit       │    │
-│  │               returns { stdout, stderr, status }                        │    │
-│  └─────────────────────────────────────────────────────────────────────────┘    │
-│                                                                                 │
-│  Config: 1 vCPU, 1GB RAM, concurrency=1, min=0, max=50                         │
-│  Autoscales: 0 instances when idle, up to 50 for parallel test cases            │
-│  Cost: $0/mo (within free tier for typical competition usage)                   │
-└──────────��─────────────────────────��─────────────────────────────��──────────────┘
++---------------------------------------------------------------------------------+
+|                              USER'S BROWSER                                     |
+|                                                                                 |
+|  +-------------+  +--------------+  +-------------+  +-----------------------+ |
+|  |  Homepage    |  |   Profile     |  | Leaderboard |  |   Problem View        | |
+|  |  (countdown) |  | (team mgmt)  |  | (rankings)  |  | (editor + submit)     | |
+|  +-------------+  +--------------+  +-------------+  +-----------------------+ |
+|                                                                                 |
+|  React 19 + Vite 8 + Tailwind 4 + React Router                                 |
++------------+------------------+-------------------------------+-----------------+
+             |                  |                               |
+             | Google SSO       | Real-time listeners           | httpsCallable
+             |                  | (onSnapshot)                  | "Run Code" / Submit
+             v                  v                               v
++---------------------------------------------------------------------------------+
+|                         FIREBASE  (GCP: cint-live)                              |
+|                                                                                 |
+|  +------------------+    +--------------------------------------------------+   |
+|  |  Firebase Auth    |    |              Firestore Database                  |   |
+|  |                   |    |                                                  |   |
+|  |  Google Provider  |    |  +----------+ +--------+ +-------+ +---------+  |   |
+|  |  SSO login flow   |    |  | problems | | teams  | | users | |joinCodes|  |   |
+|  +------------------+    |  | (9 docs) | |        | |       | |         |  |   |
+|                           |  +----------+ +--------+ +-------+ +---------+  |   |
+|                           |                                                  |   |
+|                           |  +---------------------------------------+       |   |
+|                           |  |            submissions                 |       |   |
+|                           |  |  (created by frontend on "Submit")     |       |   |
+|                           |  |                                        |       |   |
+|                           |  |  status: Pending -> Running -> Result  |       |   |
+|                           |  +------------------+--------------------+       |   |
+|                           +---------------------+------------------------+   |
+|                                                 |                                |
+|                                                 | Firestore onCreate trigger     |
+|                                                 | (Eventarc)                     |
+|                                                 v                                |
+|  +------------------------------------------------------------------------+   |
+|  |              Cloud Functions Gen2  (us-central1, Node.js 22)           |   |
+|  |                                                                        |   |
+|  |  +---------------------------+    +----------------------------------+ |   |
+|  |  |      runCode              |    |       processSubmission          | |   |
+|  |  |  (httpsCallable)          |    |    (Firestore onCreate trigger)  | |   |
+|  |  |                           |    |                                  | |   |
+|  |  |  - Receives code +        |    |  1. Extract submission ID        | |   |
+|  |  |    language from UI        |    |     (protobuf fallback)         | |   |
+|  |  |  - Sends to Cloud Run     |    |  2. Read submission from Firestore| |   |
+|  |  |  - 10s time limit         |    |  3. Claim: Pending -> Running   | |   |
+|  |  |  - Returns stdout/err     |    |  4. Fetch test cases from problem| |   |
+|  |  |                           |    |  5. Run ALL tests in parallel    | |   |
+|  |  |  Timeout: 30s             |    |     (Promise.all -> Cloud Run)   | |   |
+|  |  +------------+--------------+    |  6. Write results back           | |   |
+|  |               |                   |  7. If all pass: update team score| |   |
+|  |               |                   |                                  | |   |
+|  |               |                   |  Timeout: 540s                   | |   |
+|  |               |                   +--------------+-------------------+ |   |
+|  +---------------+----------------------------------+---------------------+   |
++------------------+----------------------------------+-------------------------+
+                   |                                  |
+                   |  HTTP POST /run                  |  HTTP POST /run (parallel)
+                   |                                  |  (15 test cases = 15 instances)
+                   v                                  v
++---------------------------------------------------------------------------------+
+|         Cloud Run: code-runner  (us-central1, serverless)                       |
+|         https://code-runner-1074290783330.us-central1.run.app                   |
+|                                                                                 |
+|  +-------------------------------------------------------------------------+    |
+|  |                        Container (Node.js 20)                           |    |
+|  |                                                                         |    |
+|  |  Runtimes installed:                                                    |    |
+|  |  +----------+  +----------+  +----------+  +----------+                |    |
+|  |  | Python 3 |  | Node.js  |  | g++ (C++)|  | Java JDK |                |    |
+|  |  | (id: 71) |  | (id: 63) |  | (id: 54) |  | (id: 62) |                |    |
+|  |  +----------+  +----------+  +----------+  +----------+                |    |
+|  |                                                                         |    |
+|  |  POST /run  ->  writes code to temp file  ->  subprocess.exec          |    |
+|  |                  with stdin from file           with timeout + ulimit   |    |
+|  |                  returns { stdout, stderr, status }                     |    |
+|  +-------------------------------------------------------------------------+    |
+|                                                                                 |
+|  Config: 1 vCPU, 1GB RAM, concurrency=1, min=0, max=50                         |
+|  Autoscales: 0 instances when idle, up to 50 for parallel test cases            |
+|  Cost: $0/mo (within free tier for typical competition usage)                   |
++---------------------------------------------------------------------------------+
 ```
 
 ### Data Flow — Code Submission Lifecycle
 
 ```
  User clicks "Submit"
-        │
-        ▼
- ┌──────────────────┐     Frontend writes doc to Firestore
- │  Browser (React)  │───────────��────────────────────────────┐
- └──────────────────┘                                         │
-                                                              ▼
-                                              ┌───────────────────────────┐
-                                              │  Firestore: submissions/  ���
-                                              │                           │
-                                              │  status: "Pending"        │
-                                              │  code: "print(...)"       │
-                                              │  languageId: 71           │
-                                              │  problemId: "1"           │
-                                              │  teamId: "abc123"         │
-                                              └─────────────┬──��──────────┘
-                                                            │
-                                         Eventarc onCreate trigger fires
-                                                            │
-                                                            ▼
-                                              ┌─��────────────────────────���┐
-                                              │   processSubmission()     │
-                                              │   Cloud Function Gen2     │
-                                              │                           │
-                                              │   1. Parse submission ID  │
-                                              │   2. Read doc directly    │
-                                              │   3. Set → "Running"      │
-                                              └─────────────┬─────────────┘
-                                                            │
-                                          Fetch test cases from problems/{id}
-                                                            │
-                                                            ▼
-                                              ┌────────��──────────────────┐
-                                              │   Parallel Execution      │
-                                              │   (Promise.all)           │
-                                              │                           │
-                                              │  ┌─────┐ ┌─────┐ ┌─────┐ │
-                                              │  │TC #1│ │TC #2│ │TC #N│ │
-                                              │  └──���──┘ └──┬──┘ └──┬──�� │
-                                              └─────┼───────┼───────┼───���─┘
-                                                    │       │       │
-                                          HTTP POST to Cloud Run (each test case)
-                                          Each gets its OWN Cloud Run instance
-                                                    │       │       │
-                                                    ▼       ▼       ▼
-                                              ┌───────────────────────────┐
-                                              │  Cloud Run: code-runner   │
-                                              │                           │
-                                              │  Runs code via subprocess │
-                                              │  with timeout + ulimit    │
-                                              │  15s time limit per case  │
-                                              │                           │
-                                              │  Returns: stdout, stderr, │
-                                              │  status (Accepted/TLE/RE) │
-                                              └─────────────┬────────���────┘
-                                                            │
-                                                  Results collected
-                                                            │
-                                                            ▼
-                                              ┌────────────────────────��──┐
-                                              │  Compare outputs          │
-                                              │                           │
-                                              │  For each test case:      │
-                                              │    actual vs expected     │
-                                              │    → passed: true/false   │
-                                              └─────────────┬─────────────┘
-                                                            │
-                                          ┌─────────────────┴──────────────────┐
-                                          │                                    │
-                                    All passed?                          Any failed?
-                                          │                                    │
-                                          ▼                                    ▼
-                              ┌─────────────────────┐            ┌─────────────────────┐
-                              │ status: "Accepted"   │            │ status: "Wrong       │
-                              │                      │            │  Answer" / "TLE" /   │
-                              │ + Update team:       │            │  "Error"             │
-                              │   score += points    │            │                      │
-                              │   solvedProblems +=  │            │ results[] written    │
-                              │     problemId        │            │ to submission doc    │
-                              └────���────────────────┘            └─────────────────────┘
-                                          │                                    │
-                                          └──────────────┬───��─────────────────┘
-                                                         │
-                                                         ▼
-                                              ┌��───────────────────────���──┐
-                                              │  Firestore updated        │
-                                              │  onSnapshot fires in UI   │
-                                              │  → User sees results      │
-                                              └───────���───────────────────┘
+        |
+        v
+ +------------------+     Frontend writes doc to Firestore
+ |  Browser (React)  |--------------------------------------------+
+ +------------------+                                              |
+                                                                   v
+                                                   +---------------------------+
+                                                   |  Firestore: submissions/  |
+                                                   |                           |
+                                                   |  status: "Pending"        |
+                                                   |  code: "print(...)"       |
+                                                   |  languageId: 71           |
+                                                   |  problemId: "1"           |
+                                                   |  teamId: "abc123"         |
+                                                   +-------------+-------------+
+                                                                 |
+                                              Eventarc onCreate trigger fires
+                                                                 |
+                                                                 v
+                                                   +---------------------------+
+                                                   |   processSubmission()     |
+                                                   |   Cloud Function Gen2     |
+                                                   |                           |
+                                                   |   1. Parse submission ID  |
+                                                   |   2. Read doc directly    |
+                                                   |   3. Set -> "Running"     |
+                                                   +-------------+-------------+
+                                                                 |
+                                              Fetch test cases from problems/{id}
+                                                                 |
+                                                                 v
+                                                   +---------------------------+
+                                                   |   Parallel Execution      |
+                                                   |   (Promise.all)           |
+                                                   |                           |
+                                                   |  +-----+ +-----+ +-----+ |
+                                                   |  |TC #1| |TC #2| |TC #N| |
+                                                   |  +--+--+ +--+--+ +--+--+ |
+                                                   +-----+-------+-------+-----+
+                                                         |       |       |
+                                              HTTP POST to Cloud Run (each test case)
+                                              Each gets its OWN Cloud Run instance
+                                                         |       |       |
+                                                         v       v       v
+                                                   +---------------------------+
+                                                   |  Cloud Run: code-runner   |
+                                                   |                           |
+                                                   |  Runs code via subprocess |
+                                                   |  with timeout + ulimit    |
+                                                   |  15s time limit per case  |
+                                                   |                           |
+                                                   |  Returns: stdout, stderr, |
+                                                   |  status (Accepted/TLE/RE) |
+                                                   +-------------+-------------+
+                                                                 |
+                                                       Results collected
+                                                                 |
+                                                                 v
+                                                   +---------------------------+
+                                                   |  Compare outputs          |
+                                                   |                           |
+                                                   |  For each test case:      |
+                                                   |    actual vs expected      |
+                                                   |    -> passed: true/false   |
+                                                   +-------------+-------------+
+                                                                 |
+                                              +------------------+-------------------+
+                                              |                                      |
+                                        All passed?                            Any failed?
+                                              |                                      |
+                                              v                                      v
+                                  +-----------------------+            +-----------------------+
+                                  | status: "Accepted"    |            | status: "Wrong        |
+                                  |                       |            |  Answer" / "TLE" /    |
+                                  | + Update team:        |            |  "Error"              |
+                                  |   score += points     |            |                       |
+                                  |   solvedProblems +=   |            | results[] written     |
+                                  |     problemId         |            | to submission doc     |
+                                  +-----------+-----------+            +-----------+-----------+
+                                              |                                      |
+                                              +----------------+---------------------+
+                                                               |
+                                                               v
+                                                   +---------------------------+
+                                                   |  Firestore updated        |
+                                                   |  onSnapshot fires in UI   |
+                                                   |  -> User sees results     |
+                                                   +---------------------------+
 ```
 
 ### Frontend Page Flow
 
 ```
-                              ┌─────────────────┐
-                              │   Loginpage.jsx  │
-                              │  Google OAuth    │
-                              └────────┬────────┘
-                                       │
+                              +-----------------+
+                              |   Loginpage.jsx  |
+                              |  Google OAuth    |
+                              +--------+--------+
+                                       |
                               Firebase Auth success
-                                       │
-                                       ▼
-                    ┌──���──────────────────────────────────┐
-                    │            App.jsx (Router)          │
-                    │   loads problems from Firestore      │
-                    │   via useProblems() hook             │
-                    └──┬──────┬──────┬──────┬──────┬──────┘
-                       │      │      │      │      │
-            ┌──────────┘      │      │      │      └───────────┐
-            ▼                 ▼      │      ▼                  ▼
-  ┌──────────────┐  ┌──���───────┐    │   ┌────────────┐  ┌───────────┐
-  │ Homepage.jsx │  │Profile   │    │   │Leaderboard │  │Problems   │
-  │              │  │.jsx      │    │   │.jsx        │  │.jsx       │
-  │ Countdown    │  │          │    │   │            │  │           │
-  │ timer to     │  │ Create/  │    │   │ Live rank  │  │ Problem   │
-  │ 2:00 PM      │  │ Join/    │    │   │ Per-prob   │  │ list      │
-  │              │  │ Leave/   │    ���   │ solve time │  │ (cards)   │
-  │ Shows "GO!"  │  │ Delete   │    │   │ Auto-      │  │           │
-  │ when started │  │ team     │    │   │ refresh    │  │           │
-  └─���────────────┘  └──────────┘    │   └────��───────┘  └───────────┘
-                                    │
-                                    ▼
-                    ┌─────────────────────────────────────┐
-                    │        layout.jsx (wrapper)          │
-                    │  ┌──────────┐  ┌───────────────────┐│
-                    │  │ sidebar  │  │ ListOfProblems.jsx ││
-                    │  │          │  │                     ││
-                    │  │ P1  [✓]  │  │  Problem title      ││
-                    │  │ P2  [✓]  │  │  Description         ││
-                    │  │ P3  [ ]  │  │  Examples            ││
-                    │  │ P4  [ ]  │  │                     ││
-                    │  │ P5  [ ]  │  │  ┌───────────────┐  ││
-                    │  │ P6  [ ]  │  │  │ CodeEdit.jsx  │  ││
-                    │  │ P7  [ ]  │  │  │ (textarea)    │  ││
-                    │  │ P8  [ ]  │  │  └────���──────────┘  ││
-                    │  │ P9  [ ]  │  │  ┌───────────────┐  ││
-                    │  │          │  │  │LanguageSelect │  ││
-                    │  │          │  │  └───────��───────┘  ││
-                    │  │          │  │  [Run] [Submit]     ││
-                    │  │          │  │  ┌───────────────┐  ││
-                    │  │          │  │  │ OutputArea    │  ││
-                    │  │          │  │  └──���────────────┘  ││
-                    │  └──────────┘  └───────────────────┘ │
-                    └───────────────────────────────────��─┘
+                                       |
+                                       v
+                    +------------------------------------+
+                    |            App.jsx (Router)         |
+                    |   loads problems from Firestore     |
+                    |   via useProblems() hook            |
+                    +--+------+------+------+------+-----+
+                       |      |      |      |      |
+            +----------+      |      |      |      +-----------+
+            v                 v      |      v                  v
+  +--------------+  +---------+    |   +------------+  +-----------+
+  | Homepage.jsx |  |Profile  |    |   |Leaderboard |  |Problems   |
+  |              |  |.jsx     |    |   |.jsx        |  |.jsx       |
+  | Countdown    |  |         |    |   |            |  |           |
+  | timer to     |  | Create/ |    |   | Live rank  |  | Problem   |
+  | 2:00 PM      |  | Join/   |    |   | Per-prob   |  | list      |
+  |              |  | Leave/  |    v   | solve time |  | (cards)   |
+  | Shows "GO!"  |  | Delete  |    |   | Auto-      |  |           |
+  | when started |  | team    |    |   | refresh    |  |           |
+  +--------------+  +---------+    |   +------------+  +-----------+
+                                   |
+                                   v
+                    +---------------------------------------+
+                    |        layout.jsx (wrapper)            |
+                    |  +----------+  +-------------------+  |
+                    |  | sidebar  |  | ListOfProblems.jsx|  |
+                    |  |          |  |                    |  |
+                    |  | P1  [x]  |  |  Problem title     |  |
+                    |  | P2  [x]  |  |  Description       |  |
+                    |  | P3  [ ]  |  |  Examples           |  |
+                    |  | P4  [ ]  |  |                    |  |
+                    |  | P5  [ ]  |  |  +---------------+ |  |
+                    |  | P6  [ ]  |  |  | CodeEdit.jsx  | |  |
+                    |  | P7  [ ]  |  |  | (textarea)    | |  |
+                    |  | P8  [ ]  |  |  +---------------+ |  |
+                    |  | P9  [ ]  |  |  +---------------+ |  |
+                    |  |          |  |  |LanguageSelect | |  |
+                    |  |          |  |  +---------------+ |  |
+                    |  |          |  |  [Run] [Submit]    |  |
+                    |  |          |  |  +---------------+ |  |
+                    |  |          |  |  | OutputArea    | |  |
+                    |  |          |  |  +---------------+ |  |
+                    |  +----------+  +-------------------+ |
+                    +---------------------------------------+
 ```
 
 ### Network Topology
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        GCP Project: cint-live                    │
-│                        Region: us-central1                       │
-│                                                                  │
-│  ┌────────────────────────────┐                                  │
-│  │  Cloud Functions Gen2      │                                  │
-│  │  (managed, serverless)     │    HTTPS (authed)                │
-│  │                            │──────────────────┐               │
-│  │  runCode                   │                  │               │
-│  │  processSubmission         │                  │               │
-│  └───���────────────────────────┘                  │               │
-│                                                  │               │
-│  ┌────────────────────────────┐                  │               │
-│  │  Firestore                 │                  │               │
-│  │  (default database)        │                  │               │
-│  └─────���──────────────────────┘                  │               │
-│                                                  ▼               │
-│  ��────────────────────────────────────────────────────────────┐  │
-│  │  Cloud Run: code-runner (serverless)                       │  │
-│  │                                                            │  │
-│  │  URL: code-runner-1074290783330.us-central1.run.app        │  │
-│  │  Image: us-central1-docker.pkg.dev/cint-live/code-runner/  │  │
-│  │         code-runner:latest                                 │  ��
-│  │                                                            ��  │
-│  │  1 vCPU, 1GB RAM, concurrency=1                           │  ��
-│  │  min-instances=0 (scales to zero when idle)                │  │
-│  │  max-instances=50 (handles 50 parallel test cases)         │  │
-│  │                                                            │  │
-│  │  Runtimes: Python 3, Node.js 20, g++ (C++), Java JDK      │  │
-│  └────���────────────────────────────���──────────────────────────┘  │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-��  │  Artifact Registry: code-runner                            │  │
-│  │  Docker image repository                                   │  │
-│  └─────���──────────────────────────────────────────────────────┘  │
-│                                                                  │
-└─────────────────────────────────────���────────────────────────────┘
-         ▲                              ▲
-         │ HTTPS                        │ HTTPS
-         │ (Firebase SDK)               │ (Vercel / Firebase Hosting)
-         │                              │
-┌────────┴──────────────────────────────┴──────────┐
-│                  Internet                         │
-│                                                   │
-│  ┌─────────────────────────────────────────────┐  │
-│  │            User Browsers                     │  │
-│  │                                              │  │
-│  │  www.cintlive.com  → Vercel (auto-deploy)   │  │
-│  │  cint-live.web.app → Firebase Hosting        │  │
-│  └───��────────────────────────────���────────────┘  │
-└───────────────────────────────────────────────────┘
++------------------------------------------------------------------+
+|                        GCP Project: cint-live                     |
+|                        Region: us-central1                        |
+|                                                                   |
+|  +----------------------------+                                   |
+|  |  Cloud Functions Gen2      |                                   |
+|  |  (managed, serverless)     |    HTTPS (authed)                 |
+|  |                            |-------------------+               |
+|  |  runCode                   |                   |               |
+|  |  processSubmission         |                   |               |
+|  +----------------------------+                   |               |
+|                                                   |               |
+|  +----------------------------+                   |               |
+|  |  Firestore                 |                   |               |
+|  |  (default database)        |                   |               |
+|  +----------------------------+                   |               |
+|                                                   v               |
+|  +------------------------------------------------------------+  |
+|  |  Cloud Run: code-runner (serverless)                        |  |
+|  |                                                             |  |
+|  |  URL: code-runner-1074290783330.us-central1.run.app         |  |
+|  |  Image: us-central1-docker.pkg.dev/cint-live/code-runner/   |  |
+|  |         code-runner:latest                                  |  |
+|  |                                                             |  |
+|  |  1 vCPU, 1GB RAM, concurrency=1                            |  |
+|  |  min-instances=0 (scales to zero when idle)                 |  |
+|  |  max-instances=50 (handles 50 parallel test cases)          |  |
+|  |                                                             |  |
+|  |  Runtimes: Python 3, Node.js 20, g++ (C++), Java JDK       |  |
+|  +------------------------------------------------------------+  |
+|                                                                   |
+|  +------------------------------------------------------------+  |
+|  |  Artifact Registry: code-runner                             |  |
+|  |  Docker image repository                                    |  |
+|  +------------------------------------------------------------+  |
+|                                                                   |
++------------------------------------------------------------------+
+         ^                              ^
+         | HTTPS                        | HTTPS
+         | (Firebase SDK)               | (Vercel / Firebase Hosting)
+         |                              |
++--------+------------------------------+-------------+
+|                  Internet                            |
+|                                                      |
+|  +------------------------------------------------+  |
+|  |            User Browsers                        |  |
+|  |                                                 |  |
+|  |  www.cintlive.com  -> Vercel (auto-deploy)      |  |
+|  |  cint-live.web.app -> Firebase Hosting           |  |
+|  +------------------------------------------------+  |
++------------------------------------------------------+
 ```
 
 ## Infrastructure
@@ -307,7 +307,7 @@ A real-time competitive programming platform built with React + Firebase + serve
 | **Backend** | Firebase Cloud Functions Gen2 (Node.js 22) |
 | **Database** | Firestore (default database) |
 | **Auth** | Firebase Auth with Google provider |
-| **Code Executor** | Cloud Run `code-runner` (serverless, autoscales 0→50) |
+| **Code Executor** | Cloud Run `code-runner` (serverless, autoscales 0-50) |
 | **Code Runner URL** | `https://code-runner-1074290783330.us-central1.run.app` |
 | **Container Image** | `us-central1-docker.pkg.dev/cint-live/code-runner/code-runner:latest` |
 
@@ -380,7 +380,7 @@ Previously used **Judge0 on RapidAPI** (rate-limited, paid), then migrated to **
   languageId: 71,             // language ID (71=Python, 63=JS, 54=C++, 62=Java)
   problemId: "1",
   teamId: "teamId",
-  status: "Pending",          // Pending → Running → Accepted | Wrong Answer | TLE | Error
+  status: "Pending",          // Pending -> Running -> Accepted | Wrong Answer | TLE | Error
   createdAt: Timestamp,
   results: [                  // populated by processSubmission
     { input, expected, output, passed, timedOut }
@@ -399,49 +399,49 @@ Previously used **Judge0 on RapidAPI** (rate-limited, paid), then migrated to **
 
 ```
 cint-live-repo/
-│
-├── src/                          # Frontend (React + Vite)
-│   ├── App.jsx                   # Main router, auth, loads problems
-│   ├── main.jsx                  # Entry point
-│   ├── firebase/
-│   │   └── config.js             # Firebase app init, auth, Firestore
-│   ├── components/
-│   │   ├── layout.jsx            # Page layout wrapper with sidebar
-│   ���   ├── sidebar.jsx           # Problem list sidebar
-│   │   ├── NavBar.jsx            # Top navigation bar
-│   │   ├── ListOfProblems.jsx    # Problem detail view + code submission
-│   │   ├── CodeEdit.jsx          # Code editor textarea
-│   │   ├── languageSelector.jsx  # Language dropdown
-│   │   └── OutputArea.jsx        # Code output display
-│   ├── pages/
-│   │   ├── Homepage.jsx          # Countdown timer
-│   ��   ├── Loginpage.jsx         # Google OAuth login
-│   │   ├── Profile.jsx           # Team create/join/leave/delete
-│   │   ├── Problems.jsx          # Problems list page
-│   │   └── Leaderboard.jsx       # Live rankings
-│   ├── hooks/
-│   │   └── useProblems.js        # Hook to fetch problems from Firestore
-│   └── styles/
-│       └── index.css
-│
-├── code-runner/                  # Cloud Run code executor
-│   ├── Dockerfile                # Node.js 20 + Python + g++ + Java
-│   └── server.js                 # HTTP server: POST /run endpoint
-│
-├── functions/                    # Firebase Cloud Functions
-│   ├── index.js                  # runCode + processSubmission
-│   ├── .env                      # CODE_RUNNER_URL
-│   ├── package.json              # Node 22, firebase-functions, axios
-│   ├── problems.json             # Problem definitions + test cases (reference)
-│   └── uploadProblems.js         # Script to upload problems to Firestore
-│
-├── vercel.json                   # Vercel SPA rewrites + cache headers
-├── firebase.json                 # Firebase config (hosting, functions, rules)
-├── firestore.rules               # Firestore security rules
-├── .firebaserc                   # Project alias: default → cint-live
-├── package.json                  # Frontend deps
-├── vite.config.js                # Vite build config
-└── index.html                    # HTML entry point
+|
+|-- src/                          # Frontend (React + Vite)
+|   |-- App.jsx                   # Main router, auth, loads problems
+|   |-- main.jsx                  # Entry point
+|   |-- firebase/
+|   |   +-- config.js             # Firebase app init, auth, Firestore
+|   |-- components/
+|   |   |-- layout.jsx            # Page layout wrapper with sidebar
+|   |   |-- sidebar.jsx           # Problem list sidebar
+|   |   |-- NavBar.jsx            # Top navigation bar
+|   |   |-- ListOfProblems.jsx    # Problem detail view + code submission
+|   |   |-- CodeEdit.jsx          # Code editor textarea
+|   |   |-- languageSelector.jsx  # Language dropdown
+|   |   +-- OutputArea.jsx        # Code output display
+|   |-- pages/
+|   |   |-- Homepage.jsx          # Countdown timer
+|   |   |-- Loginpage.jsx         # Google OAuth login
+|   |   |-- Profile.jsx           # Team create/join/leave/delete
+|   |   |-- Problems.jsx          # Problems list page
+|   |   +-- Leaderboard.jsx       # Live rankings
+|   |-- hooks/
+|   |   +-- useProblems.js        # Hook to fetch problems from Firestore
+|   +-- styles/
+|       +-- index.css
+|
+|-- code-runner/                  # Cloud Run code executor
+|   |-- Dockerfile                # Node.js 20 + Python + g++ + Java
+|   +-- server.js                 # HTTP server: POST /run endpoint
+|
+|-- functions/                    # Firebase Cloud Functions
+|   |-- index.js                  # runCode + processSubmission
+|   |-- .env                      # CODE_RUNNER_URL
+|   |-- package.json              # Node 22, firebase-functions, axios
+|   |-- problems.json             # Problem definitions + test cases (reference)
+|   +-- uploadProblems.js         # Script to upload problems to Firestore
+|
+|-- vercel.json                   # Vercel SPA rewrites + cache headers
+|-- firebase.json                 # Firebase config (hosting, functions, rules)
+|-- firestore.rules               # Firestore security rules
+|-- .firebaserc                   # Project alias: default -> cint-live
+|-- package.json                  # Frontend deps
+|-- vite.config.js                # Vite build config
++-- index.html                    # HTML entry point
 ```
 
 ## Supported Languages
