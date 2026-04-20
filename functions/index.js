@@ -3,27 +3,28 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { setGlobalOptions } = require("firebase-functions/v2");
 const admin = require("firebase-admin");
 const axios = require("axios");
-
 admin.initializeApp();
 const db = admin.firestore();
 db.settings({ ignoreUndefinedProperties: true });
 
 setGlobalOptions({ region: "us-central1", memory: "512MiB" });
 
-// Self-hosted Judge0 on GCE VM — set JUDGE0_URL in .env (e.g. http://10.x.x.x:2358)
-const JUDGE0_URL = process.env.JUDGE0_URL || "http://localhost:2358";
+// Cloud Run code executor (serverless, autoscales)
+const CODE_RUNNER_URL = process.env.CODE_RUNNER_URL || "https://code-runner-1074290783330.us-central1.run.app";
 
-async function runOnJudge0({ code, languageId, stdin, wallTimeLimit }) {
+async function runCode({ code, languageId, stdin, timeoutSec }) {
   const res = await axios.post(
-    `${JUDGE0_URL}/submissions?base64_encoded=false&wait=true`,
+    `${CODE_RUNNER_URL}/run`,
     {
       source_code: code,
       language_id: languageId,
       stdin: stdin || "",
-      cpu_time_limit: 2,
-      wall_time_limit: wallTimeLimit,
+      cpu_time_limit: timeoutSec || 10,
     },
-    { headers: { "Content-Type": "application/json" }, timeout: (wallTimeLimit + 10) * 1000 }
+    {
+      headers: { "Content-Type": "application/json" },
+      timeout: (timeoutSec + 15) * 1000,
+    }
   );
   return res.data;
 }
@@ -31,7 +32,7 @@ async function runOnJudge0({ code, languageId, stdin, wallTimeLimit }) {
 exports.runCode = onCall({ timeoutSeconds: 30 }, async (request) => {
   const { code, languageId, stdin } = request.data;
   try {
-    const r = await runOnJudge0({ code, languageId, stdin, wallTimeLimit: 5 });
+    const r = await runCode({ code, languageId, stdin, timeoutSec: 10 });
     return {
       stdout: r.stdout || "",
       stderr: r.stderr || r.compile_output || "",
@@ -104,13 +105,15 @@ exports.processSubmission = onDocumentCreated(
       const problemSnap = await db.collection("problems").doc(data.problemId).get();
       const testCasesRaw = problemSnap.data().testCases;
       const testCases = typeof testCasesRaw === "string" ? JSON.parse(testCasesRaw) : testCasesRaw || [];
+
+      // Run all test cases in parallel — Cloud Run autoscales, no bottleneck
       const results = await Promise.all(testCases.map(async (test) => {
         try {
-          const r = await runOnJudge0({
+          const r = await runCode({
             code: data.code,
             languageId: data.languageId,
             stdin: test.input,
-            wallTimeLimit: 15,
+            timeoutSec: 15,
           });
           const output = (r.stdout || "").trim();
           const timedOut = r.status?.id === 5;
